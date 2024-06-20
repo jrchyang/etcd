@@ -385,28 +385,43 @@ type raft struct {
 }
 
 func newRaft(c *Config) *raft {
+	// 检测参数 Config 中个字段的合法性
 	if err := c.validate(); err != nil {
 		panic(err.Error())
 	}
+	// 创建 raftLog 实例，用于记录 entry 记录
 	raftlog := newLogWithSize(c.Storage, c.Logger, c.MaxCommittedSizePerReady)
+	// 获取 raftLog.storage 的初始状态（HardState 和 ConfState）
 	hs, cs, err := c.Storage.InitialState()
 	if err != nil {
 		panic(err) // TODO(bdarnell)
 	}
 
+	// 创建 raft 实例
 	r := &raft{
-		id:                        c.ID,
-		lead:                      None,
-		isLearner:                 false,
-		raftLog:                   raftlog,
-		maxMsgSize:                c.MaxSizePerMsg,
-		maxUncommittedSize:        c.MaxUncommittedEntriesSize,
-		prs:                       tracker.MakeProgressTracker(c.MaxInflightMsgs),
-		electionTimeout:           c.ElectionTick,
-		heartbeatTimeout:          c.HeartbeatTick,
-		logger:                    c.Logger,
-		checkQuorum:               c.CheckQuorum,
-		preVote:                   c.PreVote,
+		// 当前节点的 ID
+		id: c.ID,
+		// 当前集群中 leader 节点的 ID，初始化时先被设置成 0
+		lead:      None,
+		isLearner: false,
+		// 负责管理 entry 记录的 raftLog 实例
+		raftLog: raftlog,
+		// 每条消息的最大字节数，如果是 math.MaxUint64 则没有上限
+		// 如果是 0 则表示每条消息最多携带一条 entry
+		maxMsgSize:         c.MaxSizePerMsg,
+		maxUncommittedSize: c.MaxUncommittedEntriesSize,
+		prs:                tracker.MakeProgressTracker(c.MaxInflightMsgs),
+		// 选举超时时间
+		electionTimeout: c.ElectionTick,
+		// 心跳超时时间
+		heartbeatTimeout: c.HeartbeatTick,
+		// 普通日志输出
+		logger: c.Logger,
+		// 是否开启 CheckQuorum 模式
+		checkQuorum: c.CheckQuorum,
+		// 是否开启 PreVote 模式
+		preVote: c.PreVote,
+		// 只读请求的相关配置
 		readOnly:                  newReadOnly(c.ReadOnlyOption),
 		disableProposalForwarding: c.DisableProposalForwarding,
 	}
@@ -420,13 +435,18 @@ func newRaft(c *Config) *raft {
 	}
 	assertConfStatesEquivalent(r.logger, cs, r.switchToConfig(cfg, prs))
 
+	// 根据从 Storage 中获取的 HardState，初始化 raftLog.committed 字段，
+	// 以及 raft.Term 和 Vote 字段
 	if !IsEmptyHardState(hs) {
 		r.loadState(hs)
 	}
+
+	// 如果 Config 中配置了 Applied，则将 raftLog.applied 字段重置为指定
+	// 的 Applied 值上层模块自己的控制正确的已应用位置时使用该配置
 	if c.Applied > 0 {
 		raftlog.appliedTo(c.Applied)
 	}
-	r.becomeFollower(r.Term, None)
+	r.becomeFollower(r.Term, None) // 当前节点切换成 follower 状态
 
 	var nodesStrs []string
 	for _, n := range r.prs.VoterNodes() {
@@ -658,15 +678,17 @@ func (r *raft) maybeCommit() bool {
 
 func (r *raft) reset(term uint64) {
 	if r.Term != term {
-		r.Term = term
-		r.Vote = None
+		r.Term = term // 重置 term 字段
+		r.Vote = None // 重置 vote 字段
 	}
-	r.lead = None
+	r.lead = None // 清空 lead 字段
 
+	// 重置选举计时器和心跳计时器
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
+	// 重置选举计时器的过期时间（随机值）
 	r.resetRandomizedElectionTimeout()
-
+	// 清空 leadTransferee
 	r.abortLeaderTransfer()
 
 	r.prs.ResetVotes()
@@ -684,13 +706,17 @@ func (r *raft) reset(term uint64) {
 
 	r.pendingConfIndex = 0
 	r.uncommittedSize = 0
-	r.readOnly = newReadOnly(r.readOnly.option)
+	r.readOnly = newReadOnly(r.readOnly.option) // 只读请求的相关设置
 }
 
 func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
+	// 获取 raftLog 中最后一条记录的索引值
 	li := r.raftLog.lastIndex()
+	// 更新待追加记录的 Term 值和索引值
 	for i := range es {
+		// entry 记录的 Term 指定为当前 leader 节点的任期号
 		es[i].Term = r.Term
+		// 为日志记录指定 index
 		es[i].Index = li + 1 + uint64(i)
 	}
 	// Track the size of this uncommitted proposal.
@@ -703,19 +729,30 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 		return false
 	}
 	// use latest "last" index after truncate/append
+	// 向 raftLog 中追加记录
 	li = r.raftLog.append(es...)
+	// 更新当前节点对应的 Progress，主要是更新 Next 和 Match
 	r.prs.Progress[r.id].MaybeUpdate(li)
 	// Regardless of maybeCommit's return, our caller will call bcastAppend.
+	// 尝试提交 Entry 记录
 	r.maybeCommit()
 	return true
 }
 
 // tickElection is run by followers and candidates after r.electionTimeout.
+// 当节点编程 follower 状态之后，会周期性地调用该方法推进 electionElapsed 并检测是否超时
 func (r *raft) tickElection() {
+	// 递增 electionElapsed
 	r.electionElapsed++
 
+	// promotable() 方法会检查 prs 字段中是否还存在当前节点对应的 Progress 实例，
+	// 这是为了检测当前节点是否被从集群中移除了
+	// pastElectionTimeout() 方法是检测当前的选举计时器是否超时
+	// (r.electionElapsed >= r.randomizedElectionTimeout)
 	if r.promotable() && r.pastElectionTimeout() {
+		// 重置 electionElapsed
 		r.electionElapsed = 0
+		// 发起选举
 		r.Step(pb.Message{From: r.id, Type: pb.MsgHup})
 	}
 }
@@ -747,53 +784,73 @@ func (r *raft) tickHeartbeat() {
 }
 
 func (r *raft) becomeFollower(term uint64, lead uint64) {
+	// 将 step 字段设置成 stepFollower
+	// stepFollower() 函数中封装了 follower 节点处理消息的行为
 	r.step = stepFollower
+	// 重置 raft 实例 term、vote 等字段
 	r.reset(term)
+	// 将 tick 字段设置成 tickElection 函数
 	r.tick = r.tickElection
+	// 设置当前集群的 leader 节点
 	r.lead = lead
+	// 设置当前节点的角色
 	r.state = StateFollower
 	r.logger.Infof("%x became follower at term %d", r.id, r.Term)
 }
 
 func (r *raft) becomeCandidate() {
 	// TODO(xiangli) remove the panic when the raft implementation is stable
+	// 检测当前节点的状态，禁止直接从 leader 状态切换到 Candidate 状态
 	if r.state == StateLeader {
 		panic("invalid transition [leader -> candidate]")
 	}
+	// 将 step 字段设置成 stepCandidate，stepCandidate() 函数中封装了
+	// candidate 节点处理消息的行为
 	r.step = stepCandidate
 	r.reset(r.Term + 1)
 	r.tick = r.tickElection
+	// 此次选举中，candidate 节点会将选票头给自己
 	r.Vote = r.id
+	// 修改当前节点的角色
 	r.state = StateCandidate
 	r.logger.Infof("%x became candidate at term %d", r.id, r.Term)
 }
 
+// 如果当前集群开启了 PreVote 模式，当 follower 节点的选举计时器超时时，
+// 会先调用 becomePreCandidate() 方法切换到 PreCandidate 状态
 func (r *raft) becomePreCandidate() {
 	// TODO(xiangli) remove the panic when the raft implementation is stable
+	// 检测当前节点的状态，禁止直接从 leader 状态切换到 PreCandidate 状态
 	if r.state == StateLeader {
 		panic("invalid transition [leader -> pre-candidate]")
 	}
 	// Becoming a pre-candidate changes our step functions and state,
 	// but doesn't change anything else. In particular it does not increase
 	// r.Term or change r.Vote.
+	// 将 step 字段设置成 stepCandidate，stepCandidate() 函数中封装了
+	// PreCandidate 节点处理消息的行为
 	r.step = stepCandidate
 	r.prs.ResetVotes()
 	r.tick = r.tickElection
 	r.lead = None
+	// 修改当前节点的角色
 	r.state = StatePreCandidate
 	r.logger.Infof("%x became pre-candidate at term %d", r.id, r.Term)
 }
 
 func (r *raft) becomeLeader() {
 	// TODO(xiangli) remove the panic when the raft implementation is stable
+	// 检测当前节点的状态，禁止直接从 follower 状态切换到 leader 状态
 	if r.state == StateFollower {
 		panic("invalid transition [follower -> leader]")
 	}
+	// 将 step 字段设置成 stepLeader
+	// stepLeader() 函数中封装了 leader 节点处理消息的行为
 	r.step = stepLeader
-	r.reset(r.Term)
-	r.tick = r.tickHeartbeat
-	r.lead = r.id
-	r.state = StateLeader
+	r.reset(r.Term)          // 重置 raft 实例 Term、Vote 等字段
+	r.tick = r.tickHeartbeat // 将 tick 字段设置成 tickHeartbeat 函数
+	r.lead = r.id            // 将 leader 字段当前节点的 id
+	r.state = StateLeader    // 更新当前节点的角色
 	// Followers enter replicate mode when they've been successfully probed
 	// (perhaps after having received a snapshot as a result). The leader is
 	// trivially in this state. Note that r.reset() has initialized this
@@ -807,6 +864,7 @@ func (r *raft) becomeLeader() {
 	// could be expensive.
 	r.pendingConfIndex = r.raftLog.lastIndex()
 
+	// 向当前节点的 raftLog 中追加一条空的 entry 记录
 	emptyEnt := pb.Entry{Data: nil}
 	if !r.appendEntry(emptyEnt) {
 		// This won't happen because we just called reset() above.

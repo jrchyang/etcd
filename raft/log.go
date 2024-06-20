@@ -21,8 +21,12 @@ import (
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
+// raft 协议中日志复制部分的核心就是在集群中各个节点之间完成日志的复制
+// 因此在 etcd-raft 模块的实现中使用 raftLog 结构来管理节点上的日志
+// 它依赖于前面介绍的 Storage 接口和 unstable 结构体
 type raftLog struct {
 	// storage contains all stable entries since the last snapshot.
+	// 实际上就是 MemoryStorage 实例，其中存储了快照数据及该快照之后的 entry 记录
 	storage Storage
 
 	// unstable contains all unstable entries and snapshot.
@@ -31,10 +35,13 @@ type raftLog struct {
 
 	// committed is the highest log position that is known to be in
 	// stable storage on a quorum of nodes.
+	// 已提交的位置，即已提交的 entry 记录中最大的索引值
 	committed uint64
 	// applied is the highest log position that the application has
 	// been instructed to apply to its state machine.
 	// Invariant: applied <= committed
+	// 已应用的位置，即已应用的 entry 记录中最大的索引值
+	// 其中 committed 和 applied 之间始终满足 committed << applied
 	applied uint64
 
 	logger Logger
@@ -57,11 +64,13 @@ func newLogWithSize(storage Storage, logger Logger, maxNextEntsSize uint64) *raf
 	if storage == nil {
 		log.Panic("storage must not be nil")
 	}
+	// 创建 raftLog 实例，并初始化 storage 字段
 	log := &raftLog{
 		storage:         storage,
 		logger:          logger,
 		maxNextEntsSize: maxNextEntsSize,
 	}
+	// 获取 storage 中的第一条 entry 和最后一条 entry 的索引值
 	firstIndex, err := storage.FirstIndex()
 	if err != nil {
 		panic(err) // TODO(bdarnell)
@@ -70,6 +79,7 @@ func newLogWithSize(storage Storage, logger Logger, maxNextEntsSize uint64) *raf
 	if err != nil {
 		panic(err) // TODO(bdarnell)
 	}
+	// 初始化 unstable.offset
 	log.unstable.offset = lastIndex + 1
 	log.unstable.logger = logger
 	// Initialize our committed and applied pointers to the time of the last compaction.
@@ -85,14 +95,26 @@ func (l *raftLog) String() string {
 
 // maybeAppend returns (0, false) if the entries cannot be appended. Otherwise,
 // it returns (last index of new entries, true).
+// index 是 MsgApp 消息携带的第一条 entry 的 index 值
+// logTerm 是 MsgAPP 消息的 LogTerm 字段，通过消息中携带的该 Term 值与
+// 当前节点记录的 Term 进行比较，就可以判断消息是否为过时消息
+// committed 是 MsgApp 消息的 Commit 字段，leader 节点通过该字段通知 follower 节点
+// 当前已提交 Entry 的位置
+// ents 是 MsgApp 消息中携带的 Entry 记录，即追加到 raftLog 中的 Entry 记录
 func (l *raftLog) maybeAppend(index, logTerm, committed uint64, ents ...pb.Entry) (lastnewi uint64, ok bool) {
+	// 通过比较本地 raftLog 中 index 对应的 entry 的 term 是否等于传入的 logTerm
+	// 是否相等判断是否合法
 	if l.matchTerm(index, logTerm) {
 		lastnewi = index + uint64(len(ents))
 		ci := l.findConflict(ents)
 		switch {
+		// 返回 0 表示 raftLog 中已经包含了所有待追加的 entry 记录
+		// 不必进行任何追加操作
 		case ci == 0:
+		// 如果出现冲突的位置是已经提交的记录，则输出异常日志并终止整个程序
 		case ci <= l.committed:
 			l.logger.Panicf("entry %d conflict with committed entry [committed(%d)]", ci, l.committed)
+		// 如果冲突的位置是未提交的部分则将 ents 中未发生冲突的部分追加到 raftLog 中
 		default:
 			offset := index + 1
 			l.append(ents[ci-offset:]...)
@@ -110,6 +132,7 @@ func (l *raftLog) append(ents ...pb.Entry) uint64 {
 	if after := ents[0].Index - 1; after < l.committed {
 		l.logger.Panicf("after(%d) is out of range [committed(%d)]", after, l.committed)
 	}
+	// 提交到 unstable 中
 	l.unstable.truncateAndAppend(ents)
 	return l.lastIndex()
 }
@@ -124,16 +147,23 @@ func (l *raftLog) append(ents ...pb.Entry) uint64 {
 // An entry is considered to be conflicting if it has the same index but
 // a different term.
 // The index of the given entries MUST be continuously increasing.
+//
+// 当待追加的 entry 记录在 raftLog 中不存在时，会返回第一条不存在 entry 记录的索引值
+// raftLog 包含全部的待追加记录且没有发生冲突，则返回 0
 func (l *raftLog) findConflict(ents []pb.Entry) uint64 {
+	// 遍历全部待追加的 entry，判断 raftLog 中是否存在冲突的 entry 记录
 	for _, ne := range ents {
+		// 查找冲突的 entry 记录
 		if !l.matchTerm(ne.Index, ne.Term) {
 			if ne.Index <= l.lastIndex() {
 				l.logger.Infof("found conflict at index %d [existing term: %d, conflicting term: %d]",
 					ne.Index, l.zeroTermOnErrCompacted(l.term(ne.Index)), ne.Term)
 			}
+			// 返回冲突记录的索引
 			return ne.Index
 		}
 	}
+	// 如果没有冲突的 entry，则返回 0
 	return 0
 }
 
@@ -178,8 +208,11 @@ func (l *raftLog) unstableEntries() []pb.Entry {
 // If applied is smaller than the index of snapshot, it returns all committed
 // entries after the index of snapshot.
 func (l *raftLog) nextEnts() (ents []pb.Entry) {
+	// 获取当前已经应用记录的位置
 	off := max(l.applied+1, l.firstIndex())
+	// 是否存在已提交且微应用的 entry 记录
 	if l.committed+1 > off {
+		// 获取全部已提交且未应用的 entry 记录并返回
 		ents, err := l.slice(off, l.committed+1, l.maxNextEntsSize)
 		if err != nil {
 			l.logger.Panicf("unexpected error when getting unapplied entries (%v)", err)
@@ -192,7 +225,9 @@ func (l *raftLog) nextEnts() (ents []pb.Entry) {
 // hasNextEnts returns if there is any available entries for execution. This
 // is a fast check without heavy raftLog.slice() in raftLog.nextEnts().
 func (l *raftLog) hasNextEnts() bool {
+	// 获取当前已经应用记录的位置
 	off := max(l.applied+1, l.firstIndex())
+	// 是否存在已提交且未应用的 entry 记录
 	return l.committed+1 > off
 }
 
@@ -270,10 +305,12 @@ func (l *raftLog) term(i uint64) (uint64, error) {
 		return 0, nil
 	}
 
+	// 现在 unstable 中查找
 	if t, ok := l.unstable.maybeTerm(i); ok {
 		return t, nil
 	}
 
+	// 如果查找不到再到 storage 中查找
 	t, err := l.storage.Term(i)
 	if err == nil {
 		return t, nil
@@ -310,7 +347,11 @@ func (l *raftLog) allEntries() []pb.Entry {
 // later term is more up-to-date. If the logs end with the same term, then
 // whichever log has the larger lastIndex is more up-to-date. If the logs are
 // the same, the given log is up-to-date.
+//
+// lasti 和 term 分表是 candidate 节点的最大记录索引值和最大任期号
+// 即 MsgVote 请求（candidate 发送的选举请求）携带的 index 和 logterm
 func (l *raftLog) isUpToDate(lasti, term uint64) bool {
+	// 先比较任期号在比较索引值
 	return term > l.lastTerm() || (term == l.lastTerm() && lasti >= l.lastIndex())
 }
 
@@ -346,6 +387,8 @@ func (l *raftLog) slice(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 		return nil, nil
 	}
 	var ents []pb.Entry
+	// 如果 lo 小于 unstable.offset（unstable 中第一条记录的索引）
+	// 则需要从 raftLog.storage 中获取记录
 	if lo < l.unstable.offset {
 		storedEnts, err := l.storage.Entries(lo, min(hi, l.unstable.offset), maxSize)
 		if err == ErrCompacted {
