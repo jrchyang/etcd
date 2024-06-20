@@ -13,15 +13,19 @@ option (gogoproto.goproto_unrecognized_all) = false;
 option (gogoproto.goproto_sizecache_all) = false;
 
 enum EntryType {
-	EntryNormal       = 0;
-	EntryConfChange   = 1; // corresponds to pb.ConfChange
+	EntryNormal       = 0; // 普通的数据操作
+	EntryConfChange   = 1; // 集群变更操作 corresponds to pb.ConfChange
 	EntryConfChangeV2 = 2; // corresponds to pb.ConfChangeV2
 }
 
 message Entry {
+	// 该 Entry 所在的任期号
 	optional uint64     Term  = 2 [(gogoproto.nullable) = false]; // must be 64-bit aligned for atomic operations
+	// 该 Entry 对应的索引号
 	optional uint64     Index = 3 [(gogoproto.nullable) = false]; // must be 64-bit aligned for atomic operations
+	// 该 Entry 记录的类型
 	optional EntryType  Type  = 1 [(gogoproto.nullable) = false];
+	// 具体操作使用的数据
 	optional bytes      Data  = 4;
 }
 
@@ -61,22 +65,44 @@ enum MessageType {
 }
 
 message Message {
+	// 该字段定义了消息的类型，etcd-raft 的实现中就是通过该字段区分不同的消息类型并
+	// 进行分类处理的，MessageType 中共定义了 19 中消息类型
 	optional MessageType type        = 1  [(gogoproto.nullable) = false];
+	// 消息的目标节点 ID
 	optional uint64      to          = 2  [(gogoproto.nullable) = false];
+	// 发送消息的节点 ID
 	optional uint64      from        = 3  [(gogoproto.nullable) = false];
+	// 发送消息的节点的任期值，如果 term 值为 0，则为本地消息
+	// 在 etcd-raft 模块的实现中，对本地消息进行特殊处理
 	optional uint64      term        = 4  [(gogoproto.nullable) = false];
 	// logTerm is generally used for appending Raft logs to followers. For example,
 	// (type=MsgApp,index=100,logTerm=5) means leader appends entries starting at
 	// index=101, and the term of entry at index 100 is 5.
 	// (type=MsgAppResp,reject=true,index=100,logTerm=5) means follower rejects some
 	// entries from its leader as it already has an entry with term 5 at index 100.
+	// 该消息携带的第一条 Entry 记录的 Term 值
 	optional uint64      logTerm     = 5  [(gogoproto.nullable) = false];
+	// 该字段记录了一个索引值，该索引值的具体含义与消息的类型相关
+	// 例如，MsgApp 消息的 Index 字段保存了其携带的 Entry 记录（即 Entries 字段）
+	// 中前一条记录的 Index 值，而 MsgAppResp 消息的 Index 字段则是 follower
+	// 节点提示 leader 节点下次从哪个位置开始发送 Entry 记录
 	optional uint64      index       = 6  [(gogoproto.nullable) = false];
+	// 如果是 MsgApp 类型的消息，则该字段中保存了 leader 节点复制到 follower
+	// 节点的 Entry 记录；在其他类型消息中，该字段的含义后面会详细介绍
 	repeated Entry       entries     = 7  [(gogoproto.nullable) = false];
+	// 消息发送节点的提交位置（commitIndex）
 	optional uint64      commit      = 8  [(gogoproto.nullable) = false];
+	// 在传输快照时，该字段保存了快照数据
 	optional Snapshot    snapshot    = 9  [(gogoproto.nullable) = false];
+	// 主要用于响应类型的消息，表示是否拒绝收到的消息
+	// 例如，follower 节点收到 leader 节点发来的 MsgApp 消息，如果 follower 节点
+	// 发现 MsgApp 消息携带的 Entry 记录并不能直接追加到本地的 raftlog 中，
+	// 则会将响应消息的 reject 字段设置为 true，并且会在 rejectHint 字段中记录
+	// 合适的 Entry 索引值，供 leader 节点参考
 	optional bool        reject      = 10 [(gogoproto.nullable) = false];
+	// 在 follower 节点拒绝 leader 节点的消息之后，会在该字段记录一个 Entry 索引值供 leader 节点
 	optional uint64      rejectHint  = 11 [(gogoproto.nullable) = false];
+	// 消息携带的一些上下文信息，例如，该消息是否与 leader 节点转移相关
 	optional bytes       context     = 12;
 }
 

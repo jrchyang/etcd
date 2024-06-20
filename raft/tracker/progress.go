@@ -28,6 +28,8 @@ import (
 // strewn around `*raft.raft`. Additionally, some fields are only used when in a
 // certain State. All of this isn't ideal.
 type Progress struct {
+	// Match：对应 follower 节点当前已经成功复制的 Entry 记录的索引值
+	// Next：对应 follower 节点下一个待复制的 Entry 记录的索引值
 	Match, Next uint64
 	// State defines how the leader should interact with the follower.
 	//
@@ -40,6 +42,7 @@ type Progress struct {
 	//
 	// When in StateSnapshot, leader should have sent out snapshot
 	// before and stops sending any replication message.
+	// 对应 follower 节点的复制状态，其可选项的含义后面详细介绍
 	State StateType
 
 	// PendingSnapshot is used in StateSnapshot.
@@ -47,6 +50,7 @@ type Progress struct {
 	// index of the snapshot. If pendingSnapshot is set, the replication process of
 	// this Progress will be paused. raft will not resend snapshot until the pending one
 	// is reported to be failed.
+	// 当前正在发送的快照数据信息
 	PendingSnapshot uint64
 
 	// RecentActive is true if the progress is recently active. Receiving any messages
@@ -54,6 +58,7 @@ type Progress struct {
 	// RecentActive can be reset to false after an election timeout.
 	//
 	// TODO(tbg): the leader should always have this set to true.
+	// 从当前 leader 节点的角度来看，该 Progress 实例对应的 follower 节点是否存活
 	RecentActive bool
 
 	// ProbeSent is used while this follower is in StateProbe. When ProbeSent is
@@ -73,6 +78,7 @@ type Progress struct {
 	// When a leader receives a reply, the previous inflights should
 	// be freed by calling inflights.FreeLE with the index of the last
 	// received entry.
+	// 记录了已经法宗出去但未收到响应的消息信息
 	Inflights *Inflights
 
 	// IsLearner is true if this progress is tracked for a learner.
