@@ -256,6 +256,7 @@ func (p *ProgressTracker) ResetVotes() {
 // RecordVote records that the node with the given id voted for this Raft
 // instance if v == true (and declined it otherwise).
 func (p *ProgressTracker) RecordVote(id uint64, v bool) {
+	// 记录其他节点的投票结果
 	_, ok := p.Votes[id]
 	if !ok {
 		p.Votes[id] = v

@@ -58,6 +58,11 @@ enum MessageType {
 	MsgCheckQuorum     = 12;
 	MsgTransferLeader  = 13;
 	MsgTimeoutNow      = 14;
+	// 当 Leader 节点收到客户端的只读请求时，会将当前请求的编号记录下来，在返回数据给
+	// 客户端之前，Leader 节点需要先确定自己是否依然是当前集群的 Leader 节点（通过
+	// 心跳的方式），在确定其依然是 Leader 节点之后，就可以说明该节点可以响应该请求，
+	// 只需要等待当前 Leader 节点的提交位置（即 raftLog.committed）到达或是超过
+	// 只读请求的编号即可向客户端返回相应
 	MsgReadIndex       = 15;
 	MsgReadIndexResp   = 16;
 	MsgPreVote         = 17;
