@@ -45,7 +45,7 @@ type RawNode struct {
 // state manually by setting up a Storage that has a first index > 1 and which
 // stores the desired ConfState as its InitialState.
 func NewRawNode(config *Config) (*RawNode, error) {
-	r := newRaft(config)
+	r := newRaft(config) // 根据 Config 配置信息创建 raft 实例
 	rn := &RawNode{
 		raft: r,
 	}
@@ -139,6 +139,7 @@ func (rn *RawNode) readyWithoutAccept() Ready {
 // this call and the prior call to Ready().
 func (rn *RawNode) acceptReady(rd Ready) {
 	if rd.SoftState != nil {
+		// prevSoftSt 记录此次返回的 Ready 实例的 SoftState 状态
 		rn.prevSoftSt = rd.SoftState
 	}
 	if len(rd.ReadStates) != 0 {
