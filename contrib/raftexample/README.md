@@ -123,3 +123,10 @@ When the REST server submits a proposal, the raft server transmits the proposal 
 When raft reaches a consensus, the server publishes all committed updates over a commit channel.
 For raftexample, this commit channel is consumed by the key-value store.
 
+## 设计
+
+核心组件如下：
+
+- raftNode : raftNode 是该实例的核心组件（它定义在 raftexample/raft.go 文件中），raftNode 是上层模块和底层 etcd-raft 组件之间衔接的桥梁。raftNode 是对 etcd-raft 模块的一层封装，对上层模块提供了更简洁、更方便使用的调用方式，可以让实例中其他部分无须过多关注 etcd-raft 模块的实现细节，降低了系统耦合程度。除此之外，raftNode 还封装了很多其他的功能，例如，前面其他的 WAL 日志管理、快照管理及网络层相关功能。在该实例中，raftNode 相对于 etcd-raft 模块来说，扮演了上层模块的角色
+- kvStore : 用于存储键值对信息，kvStore 扮演了持久化存储的角色
+- httpKVAPI : 该实例向外提供的是 HTTP 接口，用户可以通过调用 HTTP 接口来模拟客户端的行为

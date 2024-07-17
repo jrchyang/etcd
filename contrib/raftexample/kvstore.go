@@ -27,9 +27,13 @@ import (
 
 // a key-value store backed by raft
 type kvstore struct {
-	proposeC    chan<- string // channel for proposing updates
-	mu          sync.RWMutex
-	kvStore     map[string]string // current committed key-value pairs
+	// httpKVAPI 处理 HTTP PUT 请求时，会调用 kvstore.Propose() 方法将用户请求的
+	// 数据写入 proposeC 通道中，之后 raftNode 会从该通道中读取数据并进行处理
+	proposeC chan<- string // channel for proposing updates
+	mu       sync.RWMutex
+	// 该字段用来存储键值对的 map，其中存储的键值都是 string 类型
+	kvStore map[string]string // current committed key-value pairs
+	// 该字段负责读取快照文件
 	snapshotter *snap.Snapshotter
 }
 
@@ -71,7 +75,9 @@ func (s *kvstore) Propose(k string, v string) {
 }
 
 func (s *kvstore) readCommits(commitC <-chan *commit, errorC <-chan error) {
+	// 循环读取 commitC
 	for commit := range commitC {
+		// 读取到 nil 时表示需要读取快照数据
 		if commit == nil {
 			// signaled to load snapshot
 			snapshot, err := s.loadSnapshot()
@@ -87,6 +93,7 @@ func (s *kvstore) readCommits(commitC <-chan *commit, errorC <-chan error) {
 			continue
 		}
 
+		// 将读取到的数据进行反序列化得到 kv 实例
 		for _, data := range commit.data {
 			var dataKv kv
 			dec := gob.NewDecoder(bytes.NewBufferString(data))
