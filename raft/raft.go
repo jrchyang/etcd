@@ -266,7 +266,7 @@ type raft struct {
 	// 当前任期中当前节点将选票投给了哪个节点，未投票时，该字段为 None
 	Vote uint64
 
-	// 与只读请求相关，后面会详细介绍只读请求的相关内容
+	// 与只读请求相关
 	readStates []ReadState
 
 	// raft 协议中每个节点都会记录本地 Log，在 etcd-raft 模块中，

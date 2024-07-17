@@ -60,6 +60,14 @@ func newLog(storage Storage, logger Logger) *raftLog {
 
 // newLogWithSize returns a log using the given storage and max
 // message size.
+//
+// | Snapshot | MemoryStorage.ents |   unstable    |
+// | ........ | .................. | ............. |
+// |          |                    |               |
+// |      firstIndex           lastIndex
+// |      committed
+// |      applied              unstable.offset
+// |                               | unstable.ents |
 func newLogWithSize(storage Storage, logger Logger, maxNextEntsSize uint64) *raftLog {
 	if storage == nil {
 		log.Panic("storage must not be nil")
@@ -305,7 +313,7 @@ func (l *raftLog) term(i uint64) (uint64, error) {
 		return 0, nil
 	}
 
-	// 现在 unstable 中查找
+	// 先在 unstable 中查找
 	if t, ok := l.unstable.maybeTerm(i); ok {
 		return t, nil
 	}
