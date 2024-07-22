@@ -34,12 +34,17 @@ const minSectorSize = 512
 const frameSizeBytes = 8
 
 type decoder struct {
-	mu  sync.Mutex
+	// 在 decoder 开始读取日志文件时，需要加锁同步
+	mu sync.Mutex
+	// decoder 实例通过该字段中记录的 Reader 实例读取相应的日志文件，这些日志文件就是
+	// wal.openAtIndex() 方法中打开的日志文件
 	brs []*fileutil.FileBufReader
 
 	// lastValidOff file offset following the last valid decoded record
+	// 读取日志记录的指针
 	lastValidOff int64
-	crc          hash.Hash32
+	// 校验码
+	crc hash.Hash32
 }
 
 func newDecoder(r ...fileutil.FileReader) *decoder {
@@ -61,25 +66,33 @@ func (d *decoder) decode(rec *walpb.Record) error {
 }
 
 func (d *decoder) decodeRecord(rec *walpb.Record) error {
+	// 检测 brs 长度，决定是否还有日志文件需要读取
 	if len(d.brs) == 0 {
 		return io.EOF
 	}
 
 	fileBufReader := d.brs[0]
+	// 读取第一个日志文件中的第一个日志记录的长度
 	l, err := readInt64(fileBufReader)
+	// 判断是否读到文件结尾，或是读取到了预分配的部分，二者都表示读取操作结束
 	if err == io.EOF || (err == nil && l == 0) {
 		// hit end of file or preallocated space
+		// 更新 brs 字段，将其中第一个日志文件对应的 Reader 清除掉
 		d.brs = d.brs[1:]
+		// 如果后面没有其他日志文件可读则返回 EOF 异常，表示读取正常结束
 		if len(d.brs) == 0 {
 			return io.EOF
 		}
+		// 若后续还有其他日志文件待读取，则需要切换文件，这里会重置 lastValidOff
 		d.lastValidOff = 0
+		// 递归调用
 		return d.decodeRecord(rec)
 	}
 	if err != nil {
 		return err
 	}
 
+	// 计算当前日志记录的实际长度及填充数据的长度，并创建相应的 data 切片
 	recBytes, padBytes := decodeFrameSize(l)
 	// The length of current WAL entry must be less than the remaining file size.
 	maxEntryLimit := fileBufReader.FileInfo().Size() - d.lastValidOff - padBytes
@@ -89,6 +102,8 @@ func (d *decoder) decodeRecord(rec *walpb.Record) error {
 	}
 
 	data := make([]byte, recBytes+padBytes)
+	// 从日志文件读取指定长度的字节数，如果读取不到，则返回 EOF 异常，此时认为读取到了
+	// 一个只写入一半的日志记录，需要返回 ErrUnexpectedEOF 异常
 	if _, err = io.ReadFull(fileBufReader, data); err != nil {
 		// ReadFull returns io.EOF only if no bytes were read
 		// the decoder should treat this as an ErrUnexpectedEOF instead.
@@ -97,6 +112,7 @@ func (d *decoder) decodeRecord(rec *walpb.Record) error {
 		}
 		return err
 	}
+	// 将 0~recBytes 反序列化成 Record
 	if err := rec.Unmarshal(data[:recBytes]); err != nil {
 		if d.isTornEntry(data) {
 			return io.ErrUnexpectedEOF
@@ -105,6 +121,7 @@ func (d *decoder) decodeRecord(rec *walpb.Record) error {
 	}
 
 	// skip crc checking if the record type is crcType
+	// 进行 crc 校验
 	if rec.Type != crcType {
 		d.crc.Write(rec.Data)
 		if err := rec.Validate(d.crc.Sum32()); err != nil {
@@ -115,6 +132,7 @@ func (d *decoder) decodeRecord(rec *walpb.Record) error {
 		}
 	}
 	// record decoded as valid; point last valid offset to end of record
+	// 将 lastValidOff 后移，准备读取下一条日志记录
 	d.lastValidOff += frameSizeBytes + recBytes + padBytes
 	return nil
 }

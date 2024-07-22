@@ -10,8 +10,11 @@ option (gogoproto.unmarshaler_all) = true;
 option (gogoproto.goproto_getters_all) = false;
 
 message Record {
+	// 表示该 Record 实例的类型
 	optional int64 type  = 1 [(gogoproto.nullable) = false];
+	// 记录该 Record 实例的校验码
 	optional uint32 crc  = 2 [(gogoproto.nullable) = false];
+	// 记录真正的日志数据，根据日志的类型不同，Data 字段中保存的数据也有所不同
 	optional bytes data  = 3;
 }
 
