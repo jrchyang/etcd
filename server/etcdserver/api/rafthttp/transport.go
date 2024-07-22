@@ -158,11 +158,15 @@ func (t *Transport) Handler() http.Handler {
 	pipelineHandler := newPipelineHandler(t, t.Raft, t.ClusterID)
 	streamHandler := newStreamHandler(t, t, t.Raft, t.ID, t.ClusterID)
 	snapHandler := newSnapshotHandler(t, t.Raft, t.Snapshotter, t.ClusterID)
+	// 创建 ServerMux 实例，ServerMux 是一个多路复用器，ServerMux 主要通过其 m 字段
+	// (map[string]muxEntry 类型) 存储具体的 URL 和 Handler 实例之间的映射关系
 	mux := http.NewServeMux()
-	mux.Handle(RaftPrefix, pipelineHandler)
-	mux.Handle(RaftStreamPrefix+"/", streamHandler)
-	mux.Handle(RaftSnapshotPrefix, snapHandler)
-	mux.Handle(ProbingPrefix, probing.NewHandler())
+	// 设置 URL 与 Handler 实例的映射关系，也就是访问指定 URL 地址的请求，
+	// 由对应的 Handler 实例进行处理
+	mux.Handle(RaftPrefix, pipelineHandler)         // "/raft"
+	mux.Handle(RaftStreamPrefix+"/", streamHandler) // "/raft/stream/"
+	mux.Handle(RaftSnapshotPrefix, snapHandler)     // "/raft/snapshot"
+	mux.Handle(ProbingPrefix, probing.NewHandler()) // "/raft/probing"
 	return mux
 }
 
