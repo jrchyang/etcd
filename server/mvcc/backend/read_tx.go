@@ -31,19 +31,24 @@ type ReadTx interface {
 	RLock()
 	RUnlock()
 
+	// 在指定的 Bucket 中进行范围查找
 	UnsafeRange(bucket Bucket, key, endKey []byte, limit int64) (keys [][]byte, vals [][]byte)
+	// 遍历指定 Bucket 中的全部键值对
 	UnsafeForEach(bucket Bucket, visitor func(k, v []byte) error) error
 }
 
 // Base type for readTx and concurrentReadTx to eliminate duplicate functions between these
 type baseReadTx struct {
 	// mu protects accesses to the txReadBuffer
-	mu  sync.RWMutex
+	// 在读写 buf 中的缓存区数据时需要获取该锁进行同步
+	mu sync.RWMutex
+	// 该 buffer 主要用来缓存 Bucket 与其中键值对集合的映射关系
 	buf txReadBuffer
 
 	// TODO: group and encapsulate {txMu, tx, buckets, txWg}, as they share the same lifecycle.
 	// txMu protects accesses to buckets and tx on Range requests.
-	txMu    *sync.RWMutex
+	txMu *sync.RWMutex
+	// 该 readTx 实例底层封装的 bolt.Tx 实例，即 BoltDB 层面的只读事务
 	tx      *bolt.Tx
 	buckets map[BucketID]*bolt.Bucket
 	// txWg protects tx from being rolled back at the end of a batch interval until all reads using this tx are done.
@@ -85,7 +90,9 @@ func (baseReadTx *baseReadTx) UnsafeRange(bucketType Bucket, key, endKey []byte,
 	if limit > 1 && !bucketType.IsSafeRangeBucket() {
 		panic("do not use unsafeRange on non-keys bucket")
 	}
+	// 首先从缓存中查询键值对
 	keys, vals := baseReadTx.buf.Range(bucketType, key, endKey, limit)
+	// 检测缓存返回的键值对数量是否达到 limit 的限制，如果达到则直接返回缓存的查询结果
 	if int64(len(keys)) == limit {
 		return keys, vals
 	}
@@ -116,7 +123,9 @@ func (baseReadTx *baseReadTx) UnsafeRange(bucketType Bucket, key, endKey []byte,
 	c := bucket.Cursor()
 	baseReadTx.txMu.Unlock()
 
+	// 通过 unsafeRange() 方法从 BoltDB 中查询
 	k2, v2 := unsafeRange(c, key, endKey, limit-int64(len(keys)))
+	// 将查询缓存的结果与查询的 BoltDB 的结果合并然后返回
 	return append(k2, keys...), append(v2, vals...)
 }
 
