@@ -57,15 +57,23 @@ type watchableStore struct {
 	victims []watcherBatch
 	victimc chan struct{}
 
-	// contains all unsynced watchers that needs to sync with events that have happened
-	unsynced watcherGroup
+	// 当 etcd 服务端收到客户端的 watch 请求时，如果请求携带了 revision 参数，
+	// 则比较该请求的 revision 信息和 store.currentRev 信息：
+	//   如果请求中的 revision 信息较大，则放入 synced watcherGroup 中，
+	//   否则放入 unsynced watcherGroup
 
+	// contains all unsynced watchers that needs to sync with events that have happened
+	// 该实例中的 watcher 实例都落后于当前最新更新操作，并且有一个单独的后台 goroutine
+	// 帮助其追赶。
+	unsynced watcherGroup
 	// contains all synced watchers that are in sync with the progress of the store.
 	// The key of the map is the key that the watcher watches on.
 	synced watcherGroup
 
 	stopc chan struct{}
-	wg    sync.WaitGroup
+	// 在 watchableStore 实例中会启动两个后台 goroutine，在 watchableStore.close()
+	// 方法中会通过该 sync.WaitGroup 实例实现等待两个后台 goroutine 执行完成的功能
+	wg sync.WaitGroup
 }
 
 // cancelFunc updates unsynced and synced maps when running
@@ -516,15 +524,21 @@ func (s *watchableStore) progressIfSync(watchers map[WatchID]*watcher, responseW
 
 type watcher struct {
 	// the watcher key
+	// 该 watcher 实例监听的原始 Key 值
 	key []byte
 	// end indicates the end of the range to watch.
 	// If end is set, the watcher is on a range.
+	// 该 watcher 实例监听的结束位置（也是一个原始 Key 值）
+	// 如果该字段有值，则当前 watcher 实例是一个范围 watcher
+	// 如果该字段未设置值，则当前 watcher 实例只监听上面的 key 字段对应的键值对
 	end []byte
 
 	// victim is set when ch is blocked and undergoing victim processing
+	// 当 ch 通道阻塞时，会将该字段设置为 true
 	victim bool
 
 	// compacted is set when the watcher is removed because of compaction
+	// 如果该字段设置为 true，则表示当前 watcher 实例已经因为发生了压实操作而被删除
 	compacted bool
 
 	// restore is true when the watcher is being restored from leader snapshot
@@ -536,12 +550,18 @@ type watcher struct {
 	restore bool
 
 	// minRev is the minimum revision update the watcher will accept
+	// 能够触发当前 watcher 实例的最小 revision 值，发生在该 revision 之前的更新
+	// 操作是无法触发该 watcher 实例的
 	minRev int64
-	id     WatchID
+	// 当前 watcher 实例的唯一标识
+	id WatchID
 
+	// 过滤器。触发当前 watcher 实例的事件需要经过这些过滤器过滤才能封装进响应中
 	fcs []FilterFunc
 	// a chan to send out the watch response.
 	// The chan might be shared with other watchers.
+	// 当前 watcher 实例被触发之后，会向该通道中写入 WatchResponse，该通道可能由
+	// 多个 watcher 实例共享
 	ch chan<- WatchResponse
 }
 

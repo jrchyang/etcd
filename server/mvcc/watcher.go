@@ -78,9 +78,11 @@ type WatchStream interface {
 
 type WatchResponse struct {
 	// WatchID is the WatchID of the watcher this response sent to.
+	// 被触发的 watcher 实例的唯一标识
 	WatchID WatchID
 
 	// Events contains all the events that needs to send.
+	// 触发对应 watcher 时间集合
 	Events []mvccpb.Event
 
 	// Revision is the revision of the KV when the watchResponse is created.
@@ -88,9 +90,11 @@ type WatchResponse struct {
 	// modified revision inside Events. For a delayed response to a unsynced
 	// watcher, the revision is greater than the last modified revision
 	// inside Events.
+	// 当前 watchResponse 实例创建时对应的 revision 值
 	Revision int64
 
 	// CompactRevision is set when the watcher is cancelled due to compaction.
+	// 如果因为压缩操作对应 watcher 实例被取消了，则该字段设置为压缩操作对应的 revision
 	CompactRevision int64
 }
 

@@ -31,10 +31,16 @@ var (
 
 type eventBatch struct {
 	// evs is a batch of revision-ordered events
+	// 按照 revision 排序的 Event 实例
 	evs []mvccpb.Event
 	// revs is the minimum unique revisions observed for this batch
+	// 记录当前 eventBatch 中记录的 Event 实例来自多少个不同的 main revision，
+	// 特别注意，是不相同的 main revision 值的个数
 	revs int
 	// moreRev is first revision with more events following this batch
+	// 由于当前 eventBatch 中记录的 Event 个数到达上限之后，后续 Event 实例无法
+	// 加入该 eventBatch 中，该字段记录了无法加入该 eventBatch 实例的第一个 Event
+	// 实例对应的 main revision 值
 	moreRev int64
 }
 

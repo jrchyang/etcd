@@ -36,6 +36,8 @@ message KeyValue {
 }
 
 message Event {
+  // PUT 事件表示对应的键值对发生了新增或者更新
+  // DELETE 事件表示对应的键值对被删除
   enum EventType {
     PUT = 0;
     DELETE = 1;
@@ -49,8 +51,10 @@ message Event {
   // A PUT event with kv.Version=1 indicates the creation of a key.
   // A DELETE/EXPIRE event contains the deleted key with
   // its modification revision set to the revision of deletion.
+  // 该字段记录发生此次事件之后的键值对数据
   KeyValue kv = 2;
 
   // prev_kv holds the key-value pair before the event happens.
+  // 该字段记录发生此次事件之前的键值对数据
   KeyValue prev_kv = 3;
 }
