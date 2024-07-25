@@ -154,6 +154,7 @@ func (tr *storeTxnRead) rangeKeys(ctx context.Context, key, end []byte, curRev i
 
 	kvs := make([]mvccpb.KeyValue, limit)
 	revBytes := newRevBytes()
+	// 遍历查询到的 revision 信息
 	for i, revpair := range revpairs[:len(kvs)] {
 		select {
 		case <-ctx.Done():

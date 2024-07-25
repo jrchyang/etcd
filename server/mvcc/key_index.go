@@ -73,15 +73,24 @@ var (
 //
 //	{empty} -> key SHOULD be removed.
 type keyIndex struct {
-	key         []byte
-	modified    revision // the main rev of the last modification
+	// 客户端提供的原始 key 值
+	key []byte
+	// the main rev of the last modification
+	// 记录该 Key 值最后一次修改对应的 revision 信息
+	modified revision
+	// 当第一次创建客户端给定的 Key 值时，对应的第 0 代版本信息（即 generations[0] 项）
+	// 也会被创建，所以每个 Key 值至少对应一个 generation 实例（如果没有，则表示当前 Key
+	// 值应该被删除），每代中包含多个 revision 信息。当客户端后续不断修改该 Key 时，
+	// generation[0] 中会不断追加 revision 信息
 	generations []generation
 }
 
 // put puts a revision to the keyIndex.
 func (ki *keyIndex) put(lg *zap.Logger, main int64, sub int64) {
+	// 根据传入的 main 和 sub 构造 revision 实例
 	rev := revision{main: main, sub: sub}
 
+	// 新的 revision 需要大于旧的 revision
 	if !rev.GreaterThan(ki.modified) {
 		lg.Panic(
 			"'put' with an unexpected smaller revision",
@@ -91,19 +100,22 @@ func (ki *keyIndex) put(lg *zap.Logger, main int64, sub int64) {
 			zap.Int64("modified-revision-sub", ki.modified.sub),
 		)
 	}
+	// 创建 generation[0] 实例
 	if len(ki.generations) == 0 {
 		ki.generations = append(ki.generations, generation{})
 	}
 	g := &ki.generations[len(ki.generations)-1]
+	// 如果是新建 key，则初始化对应 generation 实例的 created 字段
 	if len(g.revs) == 0 { // create a new key
 		keysGauge.Inc()
 		g.created = rev
 	}
-	g.revs = append(g.revs, rev)
-	g.ver++
-	ki.modified = rev
+	g.revs = append(g.revs, rev) // 向 revs 中追加 revision
+	g.ver++                      // 递增 ver 统计 revision 个数
+	ki.modified = rev            // 更新最近一次修改的 revision
 }
 
+// 根据指定信息构造 keyIndex，原 keyIndex 必须为空
 func (ki *keyIndex) restore(lg *zap.Logger, created, modified revision, ver int64) {
 	if len(ki.generations) != 0 {
 		lg.Panic(
@@ -122,16 +134,20 @@ func (ki *keyIndex) restore(lg *zap.Logger, created, modified revision, ver int6
 // It also creates a new empty generation in the keyIndex.
 // It returns ErrRevisionNotFound when tombstone on an empty generation.
 func (ki *keyIndex) tombstone(lg *zap.Logger, main int64, sub int64) error {
+	// 检测当前的 keyIndex.generation 字段是否为空
 	if ki.isEmpty() {
 		lg.Panic(
 			"'tombstone' got an unexpected empty keyIndex",
 			zap.String("key", string(ki.key)),
 		)
 	}
+	// 检测当前使用的 generation 实例是否为空
 	if ki.generations[len(ki.generations)-1].isEmpty() {
 		return ErrRevisionNotFound
 	}
+	// 追加 revision
 	ki.put(lg, main, sub)
+	// 创建新的 generation 实例
 	ki.generations = append(ki.generations, generation{})
 	keysGauge.Dec()
 	return nil
@@ -139,6 +155,7 @@ func (ki *keyIndex) tombstone(lg *zap.Logger, main int64, sub int64) error {
 
 // get gets the modified, created revision and version of the key that satisfies the given atRev.
 // Rev must be higher than or equal to the given atRev.
+// 在当前 keyIndex 实例中查找小于指定的 main version 的最大 revision
 func (ki *keyIndex) get(lg *zap.Logger, atRev int64) (modified, created revision, ver int64, err error) {
 	if ki.isEmpty() {
 		lg.Panic(
@@ -146,6 +163,7 @@ func (ki *keyIndex) get(lg *zap.Logger, atRev int64) (modified, created revision
 			zap.String("key", string(ki.key)),
 		)
 	}
+	// 根据给定的 main revision 查找对应的 generation 实例，如果没有则报错
 	g := ki.findGeneration(atRev)
 	if g.isEmpty() {
 		return revision{}, revision{}, 0, ErrRevisionNotFound
@@ -162,6 +180,8 @@ func (ki *keyIndex) get(lg *zap.Logger, atRev int64) (modified, created revision
 // since returns revisions since the given rev. Only the revision with the
 // largest sub revision will be returned if multiple revisions have the same
 // main revision.
+// 返回当前 keyIndex 实例中 main 部分大于指定的 revision 实例，如果 keyIndex 中
+// 包含多个 main 部分相同的 revision 实例，则只取 sub 部分最大的实例
 func (ki *keyIndex) since(lg *zap.Logger, rev int64) []revision {
 	if ki.isEmpty() {
 		lg.Panic(
@@ -186,15 +206,18 @@ func (ki *keyIndex) since(lg *zap.Logger, rev int64) []revision {
 	var last int64
 	for ; gi < len(ki.generations); gi++ {
 		for _, r := range ki.generations[gi].revs {
+			// 过滤 main 小于指定的部分
 			if since.GreaterThan(r) {
 				continue
 			}
+			// 使用 main 相同 sub 较大的实例替换已赋值的实例
 			if r.main == last {
 				// replace the revision with a new one that has higher sub value,
 				// because the original one should not be seen by external
 				revs[len(revs)-1] = r
 				continue
 			}
+			// 追加一个 main 大于指定的 revision 实例
 			revs = append(revs, r)
 			last = r.main
 		}
@@ -206,6 +229,20 @@ func (ki *keyIndex) since(lg *zap.Logger, rev int64) []revision {
 // revision than the given atRev except the largest one (If the largest one is
 // a tombstone, it will not be kept).
 // If a generation becomes empty during compaction, it will be removed.
+//
+// |0| -> |2.0|3.0|tb|
+// |1| -> |4.0|5.0|tb|
+// |2| -> empty
+//
+// compact(4)
+//
+// |0| -> |4.0|5.0|tb|
+// |1| -> empty
+//
+// compact(5)
+//
+// |0| -> empty
+// generation 数组为 0，则该 keyIndex 实例也应该被删除
 func (ki *keyIndex) compact(lg *zap.Logger, atRev int64, available map[revision]struct{}) {
 	if ki.isEmpty() {
 		lg.Panic(
@@ -338,9 +375,13 @@ func (ki *keyIndex) String() string {
 
 // generation contains multiple revisions of a key.
 type generation struct {
-	ver     int64
-	created revision // when the generation is created (put in first revision).
-	revs    []revision
+	// 记录当前 generation 所包含的修改次数，即 revs 数组的长度
+	ver int64
+	// when the generation is created (put in first revision).
+	// 记录创建当前 generation 实例时对应的 revision 信息
+	created revision
+	// 当客户端不断更新该键值对时，revs 数组会不断追加每次更新对应的 revision 信息
+	revs []revision
 }
 
 func (g *generation) isEmpty() bool { return g == nil || len(g.revs) == 0 }

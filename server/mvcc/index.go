@@ -23,14 +23,14 @@ import (
 )
 
 type index interface {
-	Get(key []byte, atRev int64) (rev, created revision, ver int64, err error)
-	Range(key, end []byte, atRev int64) ([][]byte, []revision)
-	Revisions(key, end []byte, atRev int64, limit int) ([]revision, int)
-	CountRevisions(key, end []byte, atRev int64) int
-	Put(key []byte, rev revision)
-	Tombstone(key []byte, rev revision) error
-	RangeSince(key, end []byte, rev int64) []revision
-	Compact(rev int64) map[revision]struct{}
+	Get(key []byte, atRev int64) (rev, created revision, ver int64, err error) // 查询指定的 key
+	Range(key, end []byte, atRev int64) ([][]byte, []revision)                 // 范围查询
+	Revisions(key, end []byte, atRev int64, limit int) ([]revision, int)       //
+	CountRevisions(key, end []byte, atRev int64) int                           //
+	Put(key []byte, rev revision)                                              // 添加元素
+	Tombstone(key []byte, rev revision) error                                  // 添加墓碑
+	RangeSince(key, end []byte, rev int64) []revision                          // 范围查询
+	Compact(rev int64) map[revision]struct{}                                   // 压缩 BTree 中的全部 keyIndex
 	Keep(rev int64) map[revision]struct{}
 	Equal(b index) bool
 
@@ -46,24 +46,26 @@ type treeIndex struct {
 
 func newTreeIndex(lg *zap.Logger) index {
 	return &treeIndex{
+		// 除根节点外的其他每个节点至少 32 个元素，最多 64 个元素
 		tree: btree.New(32),
 		lg:   lg,
 	}
 }
 
 func (ti *treeIndex) Put(key []byte, rev revision) {
-	keyi := &keyIndex{key: key}
+	keyi := &keyIndex{key: key} // 创建 keyIndex 实例
 
 	ti.Lock()
 	defer ti.Unlock()
-	item := ti.tree.Get(keyi)
+	item := ti.tree.Get(keyi) // 查找指定的 key
 	if item == nil {
+		// 如果不存在则为 keyIndex 初始化其他内容，然后插入 btree
 		keyi.put(ti.lg, rev.main, rev.sub)
 		ti.tree.ReplaceOrInsert(keyi)
 		return
 	}
 	okeyi := item.(*keyIndex)
-	okeyi.put(ti.lg, rev.main, rev.sub)
+	okeyi.put(ti.lg, rev.main, rev.sub) // 如果存在则直接追加 revision 信息
 }
 
 func (ti *treeIndex) Get(key []byte, atRev int64) (modified, created revision, ver int64, err error) {
@@ -144,7 +146,9 @@ func (ti *treeIndex) CountRevisions(key, end []byte, atRev int64) int {
 	return total
 }
 
+// 查询 key~end 之间 revision 信息
 func (ti *treeIndex) Range(key, end []byte, atRev int64) (keys [][]byte, revs []revision) {
+	// 如果未指定 end 则只查找 key 对应的 revision 信息
 	if end == nil {
 		rev, _, _, err := ti.Get(key, atRev)
 		if err != nil {
@@ -209,6 +213,7 @@ func (ti *treeIndex) RangeSince(key, end []byte, rev int64) []revision {
 	return revs
 }
 
+// 遍历 BTree 中所有 keyIndex 实例，并调用 keyIndex.compact() 方法对 generation 进行压缩
 func (ti *treeIndex) Compact(rev int64) map[revision]struct{} {
 	available := make(map[revision]struct{})
 	ti.lg.Info("compact tree index", zap.Int64("revision", rev))

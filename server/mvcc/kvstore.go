@@ -63,22 +63,31 @@ type store struct {
 	cfg StoreConfig
 
 	// mu read locks for txns and write locks for non-txn store changes.
+	// 在开启只读/读写事务时，需要获取该读锁进行同步，即在 Read() 方法和 Write() 方法
+	// 中获取该读锁，在 End() 方法中释放。在进行压缩等非事务性操作时，需要加写锁进行同步
 	mu sync.RWMutex
 
-	b       backend.Backend
+	// 当前 store 实例关联的后端存储
+	b backend.Backend
+	// 当前 store 实例关联的内存索引
 	kvindex index
 
+	// 租约相关内容
 	le lease.Lessor
 
 	// revMuLock protects currentRev and compactMainRev.
 	// Locked at end of write txn and released after write txn unlock lock.
 	// Locked before locking read txn and released after locking.
+	// 在修改 currentRev 和 compactMainRev 字段时需要获取该锁进行同步
 	revMu sync.RWMutex
 	// currentRev is the revision of the last completed transaction.
+	// 记录当前的 revision 信息（main revision 部分的值）
 	currentRev int64
 	// compactMainRev is the main revision of the last compaction.
+	// 记录最近一次压缩后最小的 revision 消息
 	compactMainRev int64
 
+	// FIFO 调度器
 	fifoSched schedule.Scheduler
 
 	stopc chan struct{}
@@ -90,6 +99,7 @@ type store struct {
 // NewStore returns a new store. It is useful to create a store inside
 // mvcc pkg. It should only be used for testing externally.
 func NewStore(lg *zap.Logger, b backend.Backend, le lease.Lessor, cfg StoreConfig) *store {
+	// 初始化日志记录
 	if lg == nil {
 		lg = zap.NewNop()
 	}
@@ -97,20 +107,15 @@ func NewStore(lg *zap.Logger, b backend.Backend, le lease.Lessor, cfg StoreConfi
 		cfg.CompactionBatchLimit = defaultCompactBatchLimit
 	}
 	s := &store{
-		cfg:     cfg,
-		b:       b,
-		kvindex: newTreeIndex(lg),
-
-		le: le,
-
-		currentRev:     1,
-		compactMainRev: -1,
-
-		fifoSched: schedule.NewFIFOScheduler(),
-
-		stopc: make(chan struct{}),
-
-		lg: lg,
+		cfg:            cfg,
+		b:              b,                // 初始化 backend 字段
+		kvindex:        newTreeIndex(lg), // 初始化 kvindex 字段
+		le:             le,               //
+		currentRev:     1,                // 初始化为 1
+		compactMainRev: -1,               // 初始化为 -1
+		fifoSched:      schedule.NewFIFOScheduler(),
+		stopc:          make(chan struct{}),
+		lg:             lg,
 	}
 	s.hashes = newHashStorage(lg, s)
 	s.ReadView = &readView{s}
@@ -119,6 +124,7 @@ func NewStore(lg *zap.Logger, b backend.Backend, le lease.Lessor, cfg StoreConfi
 		s.le.SetRangeDeleter(func() lease.TxnDelete { return s.Write(traceutil.TODO()) })
 	}
 
+	// 获取 backend 的读写事务，创建名为 "key" 和 "meta" 的两个 Bucket 然后提交事务
 	tx := s.b.BatchTx()
 	tx.LockOutsideApply()
 	tx.UnsafeCreateBucket(buckets.Key)
@@ -128,6 +134,7 @@ func NewStore(lg *zap.Logger, b backend.Backend, le lease.Lessor, cfg StoreConfi
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 从 backend 中恢复当前 store 的所有状态，其中也包括内存中的 BTree 索引
 	if err := s.restore(); err != nil {
 		// TODO: return the error instead of panic here?
 		panic("failed to recover store from backend")
