@@ -91,10 +91,12 @@ type Lessor interface {
 	SetCheckpointer(cp Checkpointer)
 
 	// Grant grants a lease that expires at least after TTL seconds.
+	// 创建 Lease 实例，该 Lease 会在指定的时间（ttl）之后过期
 	Grant(id LeaseID, ttl int64) (*Lease, error)
 	// Revoke revokes a lease with given ID. The item attached to the
 	// given lease will be removed. If the ID does not exist, an error
 	// will be returned.
+	// 撤销指定的 Lease，该 Lease 实例相关的 LeaseItem 也会被删除
 	Revoke(id LeaseID) error
 
 	// Checkpoint applies the remainingTTL of a lease. The remainingTTL is used in Promote to set
@@ -103,38 +105,48 @@ type Lessor interface {
 
 	// Attach attaches given leaseItem to the lease with given LeaseID.
 	// If the lease does not exist, an error will be returned.
+	// 将指定 lease 与指定 LeaseItem 绑定，在 LeaseItem 中封装了键值对的 Key 值
 	Attach(id LeaseID, items []LeaseItem) error
 
 	// GetLease returns LeaseID for given item.
 	// If no lease found, NoLease value will be returned.
+	// 根据 LeaseItem 查询对应的 Lease 实例的 id
 	GetLease(item LeaseItem) LeaseID
 
 	// Detach detaches given leaseItem from the lease with given LeaseID.
 	// If the lease does not exist, an error will be returned.
+	// 取消指定 Lease 与指定 LeaseItem 之间的绑定关系
 	Detach(id LeaseID, items []LeaseItem) error
 
 	// Promote promotes the lessor to be the primary lessor. Primary lessor manages
 	// the expiration and renew of leases.
 	// Newly promoted lessor renew the TTL of all lease to extend + previous TTL.
+	// 如果当前节点成为 Leader 节点，则其使用的 Lessor 实例将通过该方法晋升，成为
+	// 主 Lessor，主 Lessor 将控制着整个集群找那个所有 Lessor 实例
 	Promote(extend time.Duration)
 
 	// Demote demotes the lessor from being the primary lessor.
+	// 如果当前节点从 Leader 状态转换为其他状态，则通过该方法将其使用的 Lessor 实例进行降级
 	Demote()
 
 	// Renew renews a lease with given ID. It returns the renewed TTL. If the ID does not exist,
 	// an error will be returned.
+	// 续约指定的 Lease 实例
 	Renew(id LeaseID) (int64, error)
 
 	// Lookup gives the lease at a given lease id, if any
+	// 查找指定 id 对应的 Lease 实例
 	Lookup(id LeaseID) *Lease
 
 	// Leases lists all leases.
 	Leases() []*Lease
 
 	// ExpiredLeasesC returns a chan that is used to receive expired leases.
+	// 如果出现 Lease 实例过期，则会被写入到该通道中
 	ExpiredLeasesC() <-chan []*Lease
 
 	// Recover recovers the lessor state from the given backend and RangeDeleter.
+	// 从底层的 v3 存储中恢复 Lease 实例
 	Recover(b backend.Backend, rd RangeDeleter)
 
 	// Stop stops the lessor for managing leases. The behavior of calling Stop multiple
@@ -151,13 +163,16 @@ type lessor struct {
 	// demotec will be closed if the lessor is demoted.
 	demotec chan struct{}
 
+	// 记录 id 到 Lease 实例之间的映射
 	leaseMap             map[LeaseID]*Lease
 	leaseExpiredNotifier *LeaseExpiredNotifier
 	leaseCheckpointHeap  LeaseQueue
-	itemMap              map[LeaseItem]LeaseID
+	// 记录 LeaseItem 到 Lease 实例 id 的映射
+	itemMap map[LeaseItem]LeaseID
 
 	// When a lease expires, the lessor will delete the
 	// leased range (or key) by the RangeDeleter.
+	// 主要用于从底层的存储中删除过期的 Lease 实例
 	rd RangeDeleter
 
 	// When a lease's deadline should be persisted to preserve the remaining TTL across leader
@@ -166,12 +181,15 @@ type lessor struct {
 
 	// backend to persist leases. We only persist lease ID and expiry for now.
 	// The leased items can be recovered by iterating all the keys in kv.
+	// 底层持久化 Lease 的存储
 	b backend.Backend
 
 	// minLeaseTTL is the minimum lease TTL that can be granted for a lease. Any
 	// requests for shorter TTLs are extended to the minimum TTL.
+	// Lease 实例过期时间的最小值
 	minLeaseTTL int64
 
+	// 过期的 Lease 实例会被写入该通道中并等待其他 goroutine 处理
 	expiredC chan []*Lease
 	// stopC is a channel whose closure indicates that the lessor should be stopped.
 	stopC chan struct{}
@@ -823,17 +841,22 @@ func (le *lessor) initAndRecover() {
 }
 
 type Lease struct {
-	ID           LeaseID
+	// 该 Lease 实例的唯一 ID
+	ID LeaseID
+	// 该 Lease 实例的存活时长
 	ttl          int64 // time to live of the lease in seconds
 	remainingTTL int64 // remaining time to live in seconds, if zero valued it is considered unset and the full ttl should be used
 	// expiryMu protects concurrent accesses to expiry
 	expiryMu sync.RWMutex
 	// expiry is time when lease should expire. no expiration when expiry.IsZero() is true
+	// 该 Lease 实例过期的时间戳
 	expiry time.Time
 
 	// mu protects concurrent accesses to itemSet
-	mu      sync.RWMutex
+	mu sync.RWMutex
+	// 该 map 中的 Key 是与当前 Lease 实例绑定的 LeaseItem 实例，Value 始终为空结构体
 	itemSet map[LeaseItem]struct{}
+	// 该 Lease 实例被撤销时会通过该通道关闭，从而实现通知监听该通过的 goroutine 的效果
 	revokec chan struct{}
 }
 
