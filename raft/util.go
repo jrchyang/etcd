@@ -213,6 +213,7 @@ func limitSize(ents []pb.Entry, maxSize uint64) []pb.Entry {
 	if len(ents) == 0 {
 		return ents
 	}
+	// 至少返回一个 Entry
 	size := ents[0].Size()
 	var limit int
 	for limit = 1; limit < len(ents); limit++ {

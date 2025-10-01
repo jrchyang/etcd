@@ -121,6 +121,9 @@ type ProgressTracker struct {
 
 	Votes map[uint64]bool
 
+	// 对于当前节点来说，已经发送出去但未收到响应的消息个数上限。如果处于该状态的消息超过
+	// MaxInflight 这个阈值，则暂停当前节点的消息发送，防止集群中某个节点不断发送消息，
+	// 引起网络阻塞或是压垮其他节点，从而影响其他节点的正常运行
 	MaxInflight int
 }
 
@@ -257,6 +260,7 @@ func (p *ProgressTracker) ResetVotes() {
 // instance if v == true (and declined it otherwise).
 func (p *ProgressTracker) RecordVote(id uint64, v bool) {
 	_, ok := p.Votes[id]
+	// 如果未收到对应 id 的节点的投票，则设置其投票结果
 	if !ok {
 		p.Votes[id] = v
 	}
@@ -274,6 +278,7 @@ func (p *ProgressTracker) TallyVotes() (granted int, rejected int, _ quorum.Vote
 			continue
 		}
 		v, voted := p.Votes[id]
+		// 还未收到投票，跳过
 		if !voted {
 			continue
 		}

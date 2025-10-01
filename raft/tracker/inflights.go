@@ -21,15 +21,17 @@ package tracker
 // ack is received.
 type Inflights struct {
 	// the starting index in the buffer
+	// buffer 数组被当作一个环形数组使用，该字段记录 buffer 中第一条 MsgApp 消息的下标
 	start int
 	// number of inflights in the buffer
+	// 当前 inflights 实例中记录的 MsgApp 消息个数
 	count int
-
 	// the size of the buffer
+	// 当前 inflights 实例中能够记录 MsgApp 消息个数的上限
 	size int
-
 	// buffer contains the index of the last entry
 	// inside one message.
+	// 用来记录 MsgApp 消息相关信息的数组，其中记录的是 MsgApp 消息中最后一条 Entry 记录的索引值
 	buffer []uint64
 }
 
@@ -53,18 +55,25 @@ func (in *Inflights) Clone() *Inflights {
 // for one more message, and consecutive calls to add Add() must provide a
 // monotonic sequence of indexes.
 func (in *Inflights) Add(inflight uint64) {
+	// buffer 已满无法添加
 	if in.Full() {
 		panic("cannot add into a Full inflights")
 	}
+	// 计算新增消息的下标
 	next := in.start + in.count
 	size := in.size
+	// 唤醒队列处理
 	if next >= size {
 		next -= size
 	}
+	// 初始化时的 buffer 数组比较短，随着使用会不断进行扩容，
+	// 但其扩容的上限为 size
 	if next >= len(in.buffer) {
 		in.grow()
 	}
+	// 记录最后一条 entry 记录的索引值
 	in.buffer[next] = inflight
+	// 递增 count 字段
 	in.count++
 }
 
@@ -85,6 +94,7 @@ func (in *Inflights) grow() {
 
 // FreeLE frees the inflights smaller or equal to the given `to` flight.
 func (in *Inflights) FreeLE(to uint64) {
+	// 边界检测
 	if in.count == 0 || to < in.buffer[in.start] {
 		// out of the left side of the window
 		return
@@ -92,20 +102,26 @@ func (in *Inflights) FreeLE(to uint64) {
 
 	idx := in.start
 	var i int
+	// 从 start 开始遍历
 	for i = 0; i < in.count; i++ {
+		// 查找第一个大于指定索引值的位置
 		if to < in.buffer[idx] { // found the first large inflight
 			break
 		}
 
 		// increase index and maybe rotate
 		size := in.size
+		// 因为是环形队列，如果 idx 越界，则从 0 开始继续遍历
 		if idx++; idx >= size {
 			idx -= size
 		}
 	}
 	// free i inflights and set new start index
+	// i 记录了此次释放消息的个数
+	// 调整 count 和 start
 	in.count -= i
 	in.start = idx
+	// 如果都释放完了，可以从 0 从头开始
 	if in.count == 0 {
 		// inflights is empty, reset the start index so that we don't grow the
 		// buffer unnecessarily.

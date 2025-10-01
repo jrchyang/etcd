@@ -47,27 +47,43 @@ type Storage interface {
 	// TODO(tbg): split this into two interfaces, LogStorage and StateStorage.
 
 	// InitialState returns the saved HardState and ConfState information.
+	// 返回 Storage 中记录的状态信息，返回的是 HardState 和 ConfState 实例。
+	// 集群中，每个节点都需要保存一些必需的基本信息，在 etcd 中，将其封装成 HardState，
+	// 其中主要封装了当前任期号、当前节点在该任期内将选票投给了哪个节点、已提交 Entry
+	// 记录的位置。ConfState 中封装了当前集群中所有节点的 ID
 	InitialState() (pb.HardState, pb.ConfState, error)
+
 	// Entries returns a slice of log entries in the range [lo,hi).
 	// MaxSize limits the total size of the log entries returned, but
 	// Entries returns at least one entry if any.
+	// 在 Storage 中记录了当前节点的所有 Entry 记录，Entries 方法返回指定范围的
+	// Entry 记录（[lo,hi]），第三个参数（maxSize）限定了返回的 Entry 记录的字节数上限
 	Entries(lo, hi, maxSize uint64) ([]pb.Entry, error)
+
 	// Term returns the term of entry i, which must be in the range
 	// [FirstIndex()-1, LastIndex()]. The term of the entry before
 	// FirstIndex is retained for matching purposes even though the
 	// rest of that entry may not be available.
+	// 查询指定 Index 对应的 Term 值
 	Term(i uint64) (uint64, error)
+
 	// LastIndex returns the index of the last entry in the log.
+	// 该方法返回 Storage 中记录的第一条 Entry 的索引值
 	LastIndex() (uint64, error)
+
 	// FirstIndex returns the index of the first log entry that is
 	// possibly available via Entries (older entries have been incorporated
 	// into the latest Snapshot; if storage only contains the dummy entry the
 	// first log entry is not available).
+	// 该方法返回 Storage 中记录的第一条 Entry 的索引值，在该 Entry 之前的所有 Entry
+	// 都已经被包含近了最近的一次 SnapShot 中
 	FirstIndex() (uint64, error)
+
 	// Snapshot returns the most recent snapshot.
 	// If snapshot is temporarily unavailable, it should return ErrSnapshotTemporarilyUnavailable,
 	// so raft state machine could know that Storage needs some time to prepare
 	// snapshot and call Snapshot later.
+	// 返回最近一次生成的快照数据
 	Snapshot() (pb.Snapshot, error)
 }
 
@@ -111,18 +127,23 @@ func (ms *MemoryStorage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 	ms.Lock()
 	defer ms.Unlock()
 	offset := ms.ents[0].Index
+	// 查询的 Entry 的起始索引已压缩到快照中，返回错误
 	if lo <= offset {
 		return nil, ErrCompacted
 	}
+	// 查询的 Entry 的结尾索引超过范围，直接 panic
 	if hi > ms.lastIndex()+1 {
 		getLogger().Panicf("entries' hi(%d) is out of bound lastindex(%d)", hi, ms.lastIndex())
 	}
 	// only contains dummy entries.
+	// 只包含空 Entry
 	if len(ms.ents) == 1 {
 		return nil, ErrUnavailable
 	}
 
+	// 获取切片
 	ents := ms.ents[lo-offset : hi-offset]
+	// 根据大小限制进行调整
 	return limitSize(ents, maxSize), nil
 }
 
@@ -159,6 +180,7 @@ func (ms *MemoryStorage) FirstIndex() (uint64, error) {
 }
 
 func (ms *MemoryStorage) firstIndex() uint64 {
+	// ents[0] 保存的是快照的最后一条 Entry 的索引
 	return ms.ents[0].Index + 1
 }
 
@@ -179,10 +201,12 @@ func (ms *MemoryStorage) ApplySnapshot(snap pb.Snapshot) error {
 	msIndex := ms.snapshot.Metadata.Index
 	snapIndex := snap.Metadata.Index
 	if msIndex >= snapIndex {
+		// 如果待处理的 SnapShot 数据比较旧，则直接抛出异常
 		return ErrSnapOutOfDate
 	}
 
 	ms.snapshot = snap
+	// 重置 ents，此时其中只有一个空的 Entry 实例
 	ms.ents = []pb.Entry{{Term: snap.Metadata.Term, Index: snap.Metadata.Index}}
 	return nil
 }
@@ -191,23 +215,31 @@ func (ms *MemoryStorage) ApplySnapshot(snap pb.Snapshot) error {
 // can be used to reconstruct the state at that point.
 // If any configuration changes have been made since the last compaction,
 // the result of the last ApplyConfChange must be passed in.
+// i - 新建 SnapShot 包含的最大的索引值
+// cs - 当前集群的状态
+// data - 新建 SnapShot 的具体数据
 func (ms *MemoryStorage) CreateSnapshot(i uint64, cs *pb.ConfState, data []byte) (pb.Snapshot, error) {
 	ms.Lock()
 	defer ms.Unlock()
+
+	// 已经创建过快照了
 	if i <= ms.snapshot.Metadata.Index {
 		return pb.Snapshot{}, ErrSnapOutOfDate
 	}
 
 	offset := ms.ents[0].Index
+	// 索引超过范围了
 	if i > ms.lastIndex() {
 		getLogger().Panicf("snapshot %d is out of bound lastindex(%d)", i, ms.lastIndex())
 	}
 
+	// 更新快照元数据
 	ms.snapshot.Metadata.Index = i
 	ms.snapshot.Metadata.Term = ms.ents[i-offset].Term
 	if cs != nil {
 		ms.snapshot.Metadata.ConfState = *cs
 	}
+	// 更新快照数据
 	ms.snapshot.Data = data
 	return ms.snapshot, nil
 }
@@ -227,9 +259,11 @@ func (ms *MemoryStorage) Compact(compactIndex uint64) error {
 	}
 
 	i := compactIndex - offset
+	// 修改第一个空 Entry 的信息
 	ents := make([]pb.Entry, 1, 1+uint64(len(ms.ents))-i)
 	ents[0].Index = ms.ents[i].Index
 	ents[0].Term = ms.ents[i].Term
+	// 裁剪 ents
 	ents = append(ents, ms.ents[i+1:]...)
 	ms.ents = ents
 	return nil
@@ -239,6 +273,7 @@ func (ms *MemoryStorage) Compact(compactIndex uint64) error {
 // TODO (xiangli): ensure the entries are continuous and
 // entries[0].Index > ms.entries[0].Index
 func (ms *MemoryStorage) Append(entries []pb.Entry) error {
+	// 为空直接返回
 	if len(entries) == 0 {
 		return nil
 	}
@@ -246,26 +281,37 @@ func (ms *MemoryStorage) Append(entries []pb.Entry) error {
 	ms.Lock()
 	defer ms.Unlock()
 
+	// 获取当前 MemoryStorage 第一条 Entry 的索引
 	first := ms.firstIndex()
+	// 获取要追加的最后一条 Entry 的索引
 	last := entries[0].Index + uint64(len(entries)) - 1
 
 	// shortcut if there is no new entry.
+	// entries 切片中的所有 Entry 都已经过时，无须添加任何 Entry
 	if last < first {
 		return nil
 	}
 	// truncate compacted entries
+	// first 之前的 Entry 已经添加到快照中了，不应该再记录到 ents 中，所以裁剪掉这部分
 	if first > entries[0].Index {
 		entries = entries[first-entries[0].Index:]
 	}
 
+	// 计算 entries 切片中第一条可用的 Entry 与 first 之间的差距
 	offset := entries[0].Index - ms.ents[0].Index
 	switch {
 	case uint64(len(ms.ents)) > offset:
+		// ents 中部分 Entry 要被覆盖掉
+		// 只保留 0～offset 之间的
 		ms.ents = append([]pb.Entry{}, ms.ents[:offset]...)
+		// 追加本次添加的 entries
 		ms.ents = append(ms.ents, entries...)
 	case uint64(len(ms.ents)) == offset:
+		// 无须额外操作直接追加
 		ms.ents = append(ms.ents, entries...)
 	default:
+		// 中间有缺失，直接报错
+		// 正常情况下在协议层会拒绝添加不连续的 Entry
 		getLogger().Panicf("missing log entry [last: %d, append at: %d]",
 			ms.lastIndex(), entries[0].Index)
 	}

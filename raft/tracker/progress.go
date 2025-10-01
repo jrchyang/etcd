@@ -28,7 +28,10 @@ import (
 // strewn around `*raft.raft`. Additionally, some fields are only used when in a
 // certain State. All of this isn't ideal.
 type Progress struct {
-	Match, Next uint64
+	// 对应 Follower 节点当前已经成功复制的 Entry 记录的索引值
+	Match uint64
+	// 对应 Follower 节点下一个待复制的 Entry 记录的索引值
+	Next uint64
 	// State defines how the leader should interact with the follower.
 	//
 	// When in StateProbe, leader sends at most one replication message
@@ -40,6 +43,7 @@ type Progress struct {
 	//
 	// When in StateSnapshot, leader should have sent out snapshot
 	// before and stops sending any replication message.
+	// 对应 Follower 节点的复制状态
 	State StateType
 
 	// PendingSnapshot is used in StateSnapshot.
@@ -47,6 +51,7 @@ type Progress struct {
 	// index of the snapshot. If pendingSnapshot is set, the replication process of
 	// this Progress will be paused. raft will not resend snapshot until the pending one
 	// is reported to be failed.
+	// 当前正在发送的快照数据信息
 	PendingSnapshot uint64
 
 	// RecentActive is true if the progress is recently active. Receiving any messages
@@ -54,6 +59,7 @@ type Progress struct {
 	// RecentActive can be reset to false after an election timeout.
 	//
 	// TODO(tbg): the leader should always have this set to true.
+	// 从当前 Leader 节点的角度来看，该 Progress 实例对应的 Follower 节点是否存活
 	RecentActive bool
 
 	// ProbeSent is used while this follower is in StateProbe. When ProbeSent is
@@ -73,6 +79,7 @@ type Progress struct {
 	// When a leader receives a reply, the previous inflights should
 	// be freed by calling inflights.FreeLE with the index of the last
 	// received entry.
+	// 记录了已经发送出去但未收到响应的消息信息
 	Inflights *Inflights
 
 	// IsLearner is true if this progress is tracked for a learner.
@@ -143,11 +150,14 @@ func (pr *Progress) BecomeSnapshot(snapshoti uint64) {
 // an outdated message. Otherwise it updates the progress and returns true.
 func (pr *Progress) MaybeUpdate(n uint64) bool {
 	var updated bool
-	if pr.Match < n {
+	// n 之前的成功发送所有 Entry 记录已经写入对应节点的 raftLog 中
+	if pr.Match < n { // 表明 follower 追加了 leader 的新日志，可以更新 commit
 		pr.Match = n
 		updated = true
+		// 已成功复制 entry，不需要在探测 index 了
 		pr.ProbeAcked()
 	}
+	// 移动 Next 字段，下次要复制的 Entry 记录从 Next 开始
 	pr.Next = max(pr.Next, n+1)
 	return updated
 }
@@ -171,18 +181,23 @@ func (pr *Progress) MaybeDecrTo(rejected, matchHint uint64) bool {
 	if pr.State == StateReplicate {
 		// The rejection must be stale if the progress has matched and "rejected"
 		// is smaller than "match".
+		// 出现过时的 MsgAppResp 消息，直接忽略
 		if rejected <= pr.Match {
 			return false
 		}
 		// Directly decrease next to match + 1.
 		//
 		// TODO(tbg): why not use matchHint if it's larger?
+		// 处于 StateReplicate 状态时，发送 MsgApp 消息的同时会直接调用
+		// optimisticUpdate() 方法增加 Next，这就是得 Next 可能会比 Match
+		// 大很多，这里回退 Next 至 Match 位置，并在后面重新发送 MsgApp 消息进行尝试
 		pr.Next = pr.Match + 1
 		return true
 	}
 
 	// The rejection must be stale if "rejected" does not match next - 1. This
 	// is because non-replicating followers are probed one entry at a time.
+	// 出现过时的 MsgAppResp 消息，直接忽略
 	if pr.Next-1 != rejected {
 		return false
 	}
